@@ -65,8 +65,41 @@ py -m unittest discover -s tests -v
 
 ```bash
 pip install llama-cpp-python
-py -m edgeinfer.cli serve --backend llama-cpp --model-dir ./models --prefer-quant Q4_K_M
+# 注意：全局选项必须写在子命令 serve 之前
+py -m edgeinfer.cli --model-dir ./models --backend llama-cpp --prefer-quant Q4_K_M serve
 ```
+
+### 一键脚本（Windows / Linux / macOS）
+
+| 系统 | 准备环境 | 启动服务 |
+|---|---|---|
+| Windows | `scripts\setup.bat` | `scripts\start.bat` |
+| Linux / macOS | `./scripts/setup.sh` | `./scripts/start.sh` |
+
+可用环境变量：`MODEL_DIR`、`HOST`、`PORT`、`BACKEND`、`THREADS`、`MEMORY_BUDGET_MB`、`PREFER_QUANT`。
+
+```bash
+BACKEND=llama-cpp PORT=8080 ./scripts/start.sh      # Linux / macOS
+```
+
+```bat
+set BACKEND=llama-cpp && set PORT=8080 && scripts\start.bat   :: Windows
+```
+
+- 装可选依赖：`INSTALL_EXTRAS=1 ./scripts/setup.sh`（Windows：`set INSTALL_EXTRAS=1`）。
+- 不想建虚拟环境：`NO_VENV=1`。
+- 脚本会自动创建模型目录；把 GGUF 权重放进去即可（不联网下载）。
+
+### 作为服务部署
+
+| 系统 | 配置文件 | 用法 |
+|---|---|---|
+| Linux | `deploy/systemd/edgeinfer.service` | 复制到 `/etc/systemd/system/`，改路径后 `sudo systemctl enable --now edgeinfer` |
+| macOS | `deploy/launchd/com.edgeinfer.plist` | 复制到 `/Library/LaunchDaemons/`，`sudo launchctl load -w /Library/LaunchDaemons/com.edgeinfer.plist` |
+| Windows | `deploy/windows/install-service.ps1` | **管理员** PowerShell 执行，注册为开机自启计划任务（无需额外软件）；`-Uninstall` 卸载 |
+
+> Linux 上可配合 `MemoryMax=` 给服务设内存上限，与项目内的「内存预算」形成双保险。
+> macOS / Windows 安装脚本默认 `--backend llama-cpp`，如只验证链路可改成 `mock`。
 
 ---
 

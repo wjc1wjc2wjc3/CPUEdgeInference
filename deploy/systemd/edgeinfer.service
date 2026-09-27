@@ -1,0 +1,34 @@
+[Unit]
+Description=CPUEdgeInference - CPU/边缘优先的本地推理服务
+Documentation=https://github.com/wjc1wjc2wjc3/CPUEdgeInference
+After=network.target
+
+[Service]
+Type=simple
+User=edgeinfer
+Group=edgeinfer
+WorkingDirectory=/opt/CPUEdgeInference
+
+Environment="MODEL_DIR=/opt/CPUEdgeInference/models"
+Environment="PORT=8080"
+Environment="BACKEND=llama-cpp"
+
+# 注意：全局选项必须写在子命令 serve 之前
+ExecStart=/opt/CPUEdgeInference/.venv/bin/python -m edgeinfer.cli \
+  --model-dir /opt/CPUEdgeInference/models \
+  --backend llama-cpp \
+  --threads 4 \
+  --prefer-quant Q4_K_M \
+  serve --host 127.0.0.1 --port 8080
+
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+# 边缘设备建议：给服务设内存上限，与项目内的“内存预算”双保险
+# MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target
