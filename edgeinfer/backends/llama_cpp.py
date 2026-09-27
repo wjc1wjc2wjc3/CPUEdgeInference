@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from .base import BaseBackend, GenResult, count_tokens
+from .base import BaseBackend, GenResult, apply_stop, count_tokens
 
 
 class LlamaCppBackend(BaseBackend):
@@ -42,17 +42,24 @@ class LlamaCppBackend(BaseBackend):
         self._loaded = False
         self.meta = None
 
+    def _kwargs(self, max_tokens, temperature, stop, params):
+        kw = {
+            "max_tokens": max_tokens or self.cfg.default_max_tokens,
+            "temperature": temperature,
+            "stop": stop or [],
+        }
+        # 透传常见采样参数（若底层不支持则忽略）
+        for key in ("top_p", "top_k", "seed", "repeat_penalty", "mirostat_mode"):
+            if params.get(key) is not None:
+                kw[key] = params[key]
+        return kw
+
     def generate(self, prompt: str, max_tokens: int | None = None,
-                 temperature: float = 0.7, stop=None) -> GenResult:
+                 temperature: float = 0.7, stop=None, **params) -> GenResult:
         if not self._loaded or self._llm is None:
             raise RuntimeError("模型未加载")
         t0 = time.time()
-        out = self._llm(
-            prompt,
-            max_tokens=max_tokens or self.cfg.default_max_tokens,
-            temperature=temperature,
-            stop=stop or [],
-        )
+        out = self._llm(prompt, **self._kwargs(max_tokens, temperature, stop, params))
         text = out["choices"][0]["text"]
         usage = out.get("usage", {}) or {}
         return GenResult(
@@ -62,3 +69,25 @@ class LlamaCppBackend(BaseBackend):
             latency_ms=(time.time() - t0) * 1000.0,
             finish_reason=out["choices"][0].get("finish_reason", "stop") or "stop",
         )
+
+    def stream_generate(self, prompt: str, max_tokens: int | None = None,
+                        temperature: float = 0.7, stop=None, **params):
+        if not self._loaded or self._llm is None:
+            raise RuntimeError("模型未加载")
+        stream = self._llm(prompt, stream=True,
+                           **self._kwargs(max_tokens, temperature, stop, params))
+        for chunk in stream:
+            delta = chunk.get("choices", [{}])[0].get("text", "")
+            if delta:
+                yield delta
+
+    def embed(self, texts) -> list:
+        if not self._loaded or self._llm is None:
+            raise RuntimeError("模型未加载")
+        if isinstance(texts, str):
+            texts = [texts]
+        # 新版 llama-cpp-python 提供 create_embedding；旧版提供 embed
+        if hasattr(self._llm, "create_embedding"):
+            out = self._llm.create_embedding(input=texts)
+            return [d["embedding"] for d in out.get("data", [])]
+        return [list(self._llm.embed(t)) for t in texts]

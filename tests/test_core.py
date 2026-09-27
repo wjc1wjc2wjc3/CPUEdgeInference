@@ -2,6 +2,7 @@
 
     py -m unittest discover -s tests -v
 """
+import hashlib
 import json
 import os
 import tempfile
@@ -13,7 +14,7 @@ import urllib.request
 from edgeinfer.config import Config
 from edgeinfer.memory import MemoryBudget, pick_variant
 from edgeinfer.registry import ModelMeta, Registry, detect_quant, family_of
-from edgeinfer.server import Engine, Server
+from edgeinfer.server import Engine, Server, render_messages
 
 DUMMY_MODELS = [
     "tinyllama-1.1b-chat.Q4_K_M.gguf",
@@ -138,6 +139,192 @@ class TestServer(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self._post("/v1/chat/completions", {"model": "not-exist", "messages": []})
         self.assertEqual(ctx.exception.code, 400)
+
+
+def _mk_engine(tmp, **kw):
+    cfg = Config(model_dir=tmp, backend="mock", memory_budget_mb=2048, threads=1,
+                 log_path=os.path.join(tmp, "s.jsonl"), **kw)
+    return Engine(cfg)
+
+
+class TestChatTemplates(unittest.TestCase):
+    """真实模型对 prompt 格式敏感，模板必须正确。"""
+
+    def test_chatml(self):
+        out = render_messages([{"role": "system", "content": "be nice"},
+                               {"role": "user", "content": "hi"}], "chatml")
+        self.assertIn("<|im_start|>system", out)
+        self.assertIn("<|im_end|>", out)
+        self.assertTrue(out.endswith("<|im_start|>assistant\n"))
+
+    def test_auto_defaults_to_chatml(self):
+        self.assertEqual(
+            render_messages([{"role": "user", "content": "hi"}], "auto"),
+            render_messages([{"role": "user", "content": "hi"}], "chatml"))
+
+    def test_plain(self):
+        out = render_messages([{"role": "user", "content": "hi"}], "plain")
+        self.assertIn("user: hi", out)
+        self.assertTrue(out.endswith("assistant:"))
+
+    def test_gemma(self):
+        out = render_messages([{"role": "user", "content": "hi"}], "gemma")
+        self.assertIn("<start_of_turn>user", out)
+        self.assertTrue(out.endswith("<start_of_turn>model\n"))
+
+    def test_llama2(self):
+        out = render_messages([{"role": "user", "content": "hi"}], "llama2")
+        self.assertIn("[INST]", out)
+
+
+class TestVerify(unittest.TestCase):
+    def test_sha256_integrity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "m.Q4_K_M.gguf"), "wb") as f:
+                f.write(b"abc")
+            res = _mk_engine(tmp).verify_models()
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0]["sha256"], hashlib.sha256(b"abc").hexdigest())
+
+
+class TestStopAndSampling(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        for name in DUMMY_MODELS:
+            with open(os.path.join(self.tmp.name, name), "wb") as f:
+                f.write(b"\x00" * 512)
+        self.engine = _mk_engine(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_stop_truncates_output(self):
+        r = self.engine.chat("auto", [{"role": "user", "content": "hi"}], stop=["]"])
+        self.assertNotIn("]", r["choices"][0]["message"]["content"])
+
+    def test_sampling_params_accepted(self):
+        r = self.engine.chat("auto", [{"role": "user", "content": "hi"}],
+                             top_p=0.9, top_k=40, seed=42)
+        self.assertEqual(r["object"], "chat.completion")
+
+
+class TestNewEndpoints(unittest.TestCase):
+    """流式 / CORS / embeddings / Prometheus / verify 的 HTTP 端到端。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        for name in DUMMY_MODELS:
+            with open(os.path.join(cls.tmp.name, name), "wb") as f:
+                f.write(b"\x00" * 512)
+        cls.engine = _mk_engine(cls.tmp.name)
+        cls.srv = Server(("127.0.0.1", 0), cls.engine)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+        cls.tmp.cleanup()
+
+    def _post(self, path, payload):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.headers, r.read().decode("utf-8")
+
+    def test_stream_sse(self):
+        headers, body = self._post("/v1/chat/completions", {
+            "model": "auto", "stream": True,
+            "messages": [{"role": "user", "content": "讲个故事"}],
+        })
+        self.assertIn("text/event-stream", headers.get("Content-Type", ""))
+        self.assertIn("data: [DONE]", body)
+        chunks = []
+        for line in body.splitlines():
+            if line.startswith("data: ") and not line.startswith("data: [DONE]"):
+                chunks.append(json.loads(line[6:])["choices"][0]["delta"].get("content", ""))
+        self.assertTrue("".join(chunks).strip())
+        self.assertGreater(len(chunks), 1)  # 确实是多块增量，而非一大块
+
+    def test_cors_preflight(self):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/v1/models", method="OPTIONS")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.status, 204)
+            self.assertEqual(r.headers.get("Access-Control-Allow-Origin"), "*")
+
+    def test_embeddings(self):
+        _, body = self._post("/v1/embeddings", {
+            "model": "auto", "input": ["hello", "世界"]})
+        r = json.loads(body)
+        self.assertEqual(r["object"], "list")
+        self.assertEqual(len(r["data"]), 2)
+        self.assertGreater(len(r["data"][0]["embedding"]), 0)
+
+    def test_metrics_prometheus(self):
+        self._post("/v1/chat/completions", {"model": "auto",
+                                            "messages": [{"role": "user", "content": "hi"}]})
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/metrics?format=prom", timeout=10) as r:
+            text = r.read().decode("utf-8")
+        self.assertIn("edgeinfer_requests_total", text)
+        self.assertIn("edgeinfer_latency_ms", text)
+        self.assertIn("edgeinfer_memory_budget_mb", text)
+
+    def test_admin_verify(self):
+        _, body = self._post("/admin/verify", {})
+        models = json.loads(body)["models"]
+        self.assertEqual(len(models), 3)
+        self.assertEqual(len(models[0]["sha256"]), 64)
+
+    def test_health_has_version(self):
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/health", timeout=10) as r:
+            h = json.loads(r.read().decode("utf-8"))
+        self.assertIn("version", h)
+        self.assertIn("chat_template", h)
+
+
+class TestApiKey(unittest.TestCase):
+    """可选的 Bearer 校验。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        for name in DUMMY_MODELS:
+            with open(os.path.join(cls.tmp.name, name), "wb") as f:
+                f.write(b"\x00" * 512)
+        cls.engine = _mk_engine(cls.tmp.name, api_key="secret")
+        cls.srv = Server(("127.0.0.1", 0), cls.engine)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+        cls.tmp.cleanup()
+
+    def _get(self, path, auth=None):
+        headers = {}
+        if auth:
+            headers["Authorization"] = auth
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_reject_without_key(self):
+        self.assertEqual(self._get("/v1/models"), 401)
+
+    def test_accept_with_key(self):
+        self.assertEqual(self._get("/v1/models", "Bearer secret"), 200)
 
 
 if __name__ == "__main__":

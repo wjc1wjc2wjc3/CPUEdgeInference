@@ -72,7 +72,16 @@ class Config:
     allow_network: bool = False
     log_path: str = "serve.jsonl"
 
+    # ---- API 行为 ----
+    chat_template: str = "auto"      # auto | plain | chatml | llama2 | gemma
+    cors_enabled: bool = True        # 浏览器直连（Web UI）需要 CORS 预检
+    api_key: str = ""                # 留空=不校验；设置后要求 Authorization: Bearer <key>
+    embed_dim: int = 256             # /v1/embeddings 维度（mock 后端）
+    stream_delay_s: float = 0.0      # mock 流式节流（演示用，默认不延迟）
+
     def __post_init__(self) -> None:
+        if self.chat_template not in ("auto", "plain", "chatml", "llama2", "gemma"):
+            raise ValueError(f"未知 chat_template：{self.chat_template}")
         if self.memory_budget_mb <= 0:
             self.memory_budget_mb = max(512, int(total_ram_mb() * 0.6))
         if self.threads <= 0:

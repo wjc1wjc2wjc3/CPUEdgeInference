@@ -57,6 +57,13 @@
 | 8 | **受限并发 + 超时** | 并发请求直接打爆内存/CPU | 信号量限制 `max_concurrency`，等待超时直接失败，队列深度可观测 |
 | 9 | **零依赖可跑** | 装完 torch/transformers 才跑得起来 | 核心仅标准库；默认 `mock` 后端让**整条链路在没有权重文件时也能跑通并被测试** |
 | 10 | **工程可信度** | 多数是脚本级实现，缺测试与长期维护 | 内置 unittest 覆盖注册表解析、内存降级、LRU 淘汰、HTTP 端到端（含 OpenAI 响应结构与错误码） |
+| 11 | **流式输出（SSE）** | 不少本地服务只支持一次性返回，前端体验卡顿 | `stream: true` 走标准 SSE（`data: {...}` + `[DONE]`），手工 chunked 编码实现，**仍为零依赖** |
+| 12 | **浏览器可直连** | 自研服务常缺 CORS，前端一接就跨域报错 | 默认开启 CORS 并正确响应 `OPTIONS` 预检；可选 `api_key` 做 Bearer 校验 |
+| 13 | **/v1/embeddings** | 多数本地服务只做生成，向量还得再搭一套 | 内置向量接口，可直接给本地 RAG（如 LocalRAG）供 embedding |
+| 14 | **chat 模板可配** | 一律拼 `role: content`，真实模型格式错配会明显掉质量 | 支持 `chatml / llama2 / gemma / plain`，`auto` 默认 ChatML（当前主流小模型格式） |
+| 15 | **采样参数与 stop** | 只暴露 temperature，无法控制采样与截断 | 透传 `top_p` / `top_k` / `seed` / `stop`，按 stop 正确截断并返回 `finish_reason` |
+| 16 | **Prometheus 指标导出** | 指标要么没有，要么只有自定义 JSON | `/metrics?format=prom` 输出 Prometheus 文本，可直接接入现有监控体系 |
+| 17 | **模型完整性校验** | 离线拷贝权重后无从判断文件是否损坏 | `models --verify` 或 `POST /admin/verify` 计算 sha256，部署前自检 |
 
 ---
 
@@ -182,6 +189,29 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"auto","messages":[{"role":"user","content":"你好"}]}'
 ```
 
+**流式输出**（`stream: true`，标准 SSE）：
+
+```python
+r = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "讲个故事"}],
+    stream=True,
+)
+for chunk in r:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+**向量接口**（可直接接 RAG）：
+
+```bash
+curl http://127.0.0.1:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","input":["第一段文本","第二段文本"]}'
+```
+
+其他可用参数：`temperature`、`max_tokens`、`stop`、`top_p`、`top_k`、`seed`；
+`chat_template` 通过启动参数 `--chat-template auto|chatml|llama2|gemma|plain` 指定。
+
 ---
 
 ## 五、内存自适应是怎么工作的
@@ -233,7 +263,12 @@ CPUEdgeInference/
 │   │   └── llama_cpp.py   # 可选：llama.cpp CPU 后端（n_gpu_layers=0）
 │   ├── server.py          # 标准库 HTTP：OpenAI 兼容 + /metrics
 │   └── cli.py
-├── tests/                 # unittest（含 HTTP 端到端）
+├── scripts/               # 三平台运行脚本（setup / start，.sh + .bat）
+├── deploy/
+│   ├── systemd/           # Linux 服务单元
+│   ├── launchd/           # macOS 守护进程
+│   └── windows/           # Windows 计划任务安装脚本
+├── tests/                 # unittest（含 HTTP 端到端、流式、CORS、embeddings）
 ├── examples/              # 零依赖示例
 ├── LICENSE                # AGPL-3.0
 └── README.md
@@ -243,7 +278,12 @@ CPUEdgeInference/
 
 ## 八、路线图
 
-- [ ] SSE 流式输出（`stream: true`）
+- [x] SSE 流式输出（`stream: true`）
+- [x] CORS 预检 + 可选 Bearer 校验
+- [x] `/v1/embeddings` 向量接口
+- [x] chat 模板（chatml / llama2 / gemma / plain）
+- [x] Prometheus 指标导出
+- [x] 模型 sha256 完整性校验
 - [ ] 更精准的内存估算（按 n_ctx / KV cache 精算）
 - [ ] 多后端共存与自动路由（llama.cpp / whisper.cpp 等）
 - [ ] 模型预热与常驻策略配置
@@ -276,7 +316,8 @@ CPUEdgeInference/
 协议与返回结构兼容。但回答质量取决于你本地的模型，不等同云端大模型。
 
 **Q6：支持流式输出（stream）吗？**
-当前版本不支持，已在路线图中。现在是一次性返回完整结果。
+支持。`stream: true` 走标准 SSE（`data: {...}` 逐块 + `data: [DONE]`），
+后端为 mock 时按词/字切块模拟，接真实模型后为真正的增量生成。
 
 **Q7：支持哪些模型格式？**
 以 GGUF 为主（通过 `llama-cpp-python`）；注册表也识别 `.bin` / `.ggml` 文件。

@@ -66,3 +66,48 @@ class Metrics:
                 "max_queue_depth": self.max_depth,
                 "uptime_s": round(uptime, 1),
             }
+
+    def to_prometheus(self, memory: dict | None = None) -> str:
+        """导出为 Prometheus 文本格式（便于接入现有监控体系）。
+
+        GET /metrics?format=prom
+        """
+        s = self.snapshot()
+        lines = [
+            "# HELP edgeinfer_requests_total 请求总数",
+            "# TYPE edgeinfer_requests_total counter",
+            f"edgeinfer_requests_total {s['requests']}",
+            "# HELP edgeinfer_errors_total 错误总数",
+            "# TYPE edgeinfer_errors_total counter",
+            f"edgeinfer_errors_total {s['errors']}",
+            "# HELP edgeinfer_tokens_total 累计 token 数",
+            "# TYPE edgeinfer_tokens_total counter",
+            f"edgeinfer_tokens_total {s['tokens_total']}",
+            "# HELP edgeinfer_tokens_per_second 每秒 token 数",
+            "# TYPE edgeinfer_tokens_per_second gauge",
+            f"edgeinfer_tokens_per_second {s['tokens_per_s']}",
+            "# HELP edgeinfer_latency_ms 请求延迟分位数（毫秒）",
+            "# TYPE edgeinfer_latency_ms gauge",
+            f'edgeinfer_latency_ms{{quantile="p50"}} {s["latency_ms"]["p50"]}',
+            f'edgeinfer_latency_ms{{quantile="p95"}} {s["latency_ms"]["p95"]}',
+            f'edgeinfer_latency_ms{{quantile="max"}} {s["latency_ms"]["max"]}',
+            "# HELP edgeinfer_queue_depth 当前排队/在途请求数",
+            "# TYPE edgeinfer_queue_depth gauge",
+            f"edgeinfer_queue_depth {s['queue_depth']}",
+            "# HELP edgeinfer_uptime_seconds 运行时长",
+            "# TYPE edgeinfer_uptime_seconds counter",
+            f"edgeinfer_uptime_seconds {s['uptime_s']}",
+        ]
+        if memory:
+            lines += [
+                "# HELP edgeinfer_memory_budget_mb 内存预算",
+                "# TYPE edgeinfer_memory_budget_mb gauge",
+                f"edgeinfer_memory_budget_mb {memory.get('total_mb', 0)}",
+                "# HELP edgeinfer_memory_used_mb 已用内存（模型常驻估算）",
+                "# TYPE edgeinfer_memory_used_mb gauge",
+                f"edgeinfer_memory_used_mb {memory.get('used_mb', 0)}",
+                "# HELP edgeinfer_evictions_total LRU 卸载次数",
+                "# TYPE edgeinfer_evictions_total counter",
+                f"edgeinfer_evictions_total {memory.get('evictions', 0)}",
+            ]
+        return "\n".join(lines) + "\n"
