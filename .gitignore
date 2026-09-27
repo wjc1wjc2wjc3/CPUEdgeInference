@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# 本地模型权重（体积大，且可能带许可限制，切勿提交）
+models/
+*.gguf
+*.bin
+*.ggml
+
+# 运行日志
+serve.jsonl
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,5 @@
+# CPUEdgeInference 核心：**零第三方依赖**，仅用 Python 标准库即可
+# 启动一个 OpenAI 兼容的本地推理服务（pip install -r requirements.txt 不装任何东西）。
+#
+# 可选扩展：
+#   pip install llama-cpp-python   # 真实 CPU 推理（GGUF 量化模型，强制 n_gpu_layers=0）
